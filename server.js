@@ -12,26 +12,28 @@ _.run(function () {
     var rpc_version = 1
     var rpc = {}
 
-    rpc.setChannel = function (arg, req) {
-        _.p(db.collection('channel').update({ _id : arg.channel }, {
-            $set : { text : arg.text } }, { upsert : true }, _.p()))
-    }
-
-    rpc.getChannel = function (arg, req) {
-        return _.p(db.collection('channel').findOne({ _id : arg.channel }, _.p())).text
-    }
-
     var server = createServer(db,
         process.env.PORT, process.env.SESSION_SECRET,
         rpc_version, rpc)
 
     var channels = {}
+
+    function saveChannel(channelName) {
+        var channel = channels[channelName]
+        if (!channel) return
+        _.p(db.collection('channels').update({ _id : channelName }, { $set : { text : channel.state.text } }, { upsert : true }, _.p()))
+    }
+    function loadChannel(channelName) {
+        var channel = _.p(db.collection('channels').findOne({ _id : channelName }, _.p()))
+        return channel ? channel.text : ''
+    }
+
     function joinChannel(channelName, id, ws) {
         var channel = channels[channelName]
         if (!channel) {
             channel = channels[channelName] = {
                 state : {
-                    text : '',
+                    text : loadChannel(channelName),
                     memberCount : 0
                 },
                 members : {}
@@ -42,6 +44,8 @@ _.run(function () {
         channel.state.memberCount++
         updateChannel(channelName)
     }
+
+    var saveTimeouts = {}
     function updateChannel(channelName, text, notToId) {
         var channel = channels[channelName]
         if (channel && text != undefined)
@@ -54,6 +58,14 @@ _.run(function () {
                 }))
             }
         })
+
+        if (saveTimeouts[channelName]) clearTimeout(saveTimeouts[channelName])
+        saveTimeouts[channelName] = setTimeout(function () {
+            _.run(function () {
+                delete saveTimeouts[channelName]
+                saveChannel(channelName)
+            })
+        }, 5000)
     }
     function leaveChannel(channelName, id) {
         var channel = channels[channelName]
@@ -61,8 +73,10 @@ _.run(function () {
         delete channel.members[id]
         channel.state.memberCount--
         updateChannel(channelName)
-        if (channel.state.memberCount <= 0)
+        if (channel.state.memberCount <= 0) {
+            saveChannel(channelName)
             delete channels[channelName]
+        }
     }
 
     var wss = new (require('ws').Server)({ server : server })
@@ -71,21 +85,25 @@ _.run(function () {
         var channel = null
 
         ws.on('message', function (msg) {
-            var msg = _.unJson(msg)
-            if (msg.type == 'joinChannel') {
-                channel = msg.channel
-                joinChannel(channel, id, ws)
-            } else if (msg.type == 'updateChannel') {
-                updateChannel(channel, msg.text, id)
-            }
+            _.run(function () {
+                msg = _.unJson(msg)
+                if (msg.type == 'joinChannel') {
+                    channel = msg.channel
+                    joinChannel(channel, id, ws)
+                } else if (msg.type == 'updateChannel') {
+                    updateChannel(channel, msg.text, id)
+                }
+            })
         })
 
         var keepAlive = setInterval(function() {
             ws.send(_.json({ type : 'keepAlive' }))
         }, 20 * 1000)
         ws.on('close', function () {
-            clearInterval(keepAlive)
-            leaveChannel(channel, id)
+            _.run(function () {
+                clearInterval(keepAlive)
+                leaveChannel(channel, id)
+            })
         })
     })
 })
